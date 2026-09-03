@@ -14,8 +14,6 @@ REPO="mytranslator"
 TMP_DIR="/var/volatile/tmp"
 [ -d "$TMP_DIR" ] || TMP_DIR="/tmp"
 
-PKG_MANAGER=""
-PYTHON_VERSION=""
 PY_VER=""
 ARCH=""
 
@@ -28,26 +26,19 @@ has_cmd() {
 }
 
 echo "===================================================="
-echo "         $PLUGIN INSTALLER                 "
+echo "         $PLUGIN_NAME INSTALLER                     "
 echo "===================================================="
 
-# 1. Detect Package Manager
-if has_cmd opkg; then
-    PKG_MANAGER="opkg"
-elif has_cmd apt-get; then
-    PKG_MANAGER="apt"
-else
-    log "[ERROR] No supported package manager (opkg/apt) found!"
+# 1. Check for required tools
+if ! has_cmd tar; then
+    log "[ERROR] 'tar' command not found! Please install tar first."
     exit 1
 fi
-log "[INFO] Package manager detected: ${PKG_MANAGER}"
 
 # 2. Detect Python Version
 if has_cmd python3; then
-    PYTHON_VERSION="3"
     PY_VER=$(python3 -c 'import sys; print("%d.%d" % (sys.version_info.major, sys.version_info.minor))' 2>/dev/null)
 elif has_cmd python; then
-    PYTHON_VERSION="2"
     PY_VER=$(python -c 'import sys; print("%d.%d" % (sys.version_info.major, sys.version_info.minor))' 2>/dev/null)
 fi
 
@@ -59,19 +50,30 @@ if [ -z "$PY_VER" ] && [ -f /usr/lib/enigma.info ]; then
     fi
 fi
 
-log "[INFO] Detected Python Version: Python $PY_VER"
+# Check if Python version is supported (3.13 or 3.14)
+case "$PY_VER" in
+    3.13|3.14)
+        log "[INFO] Python version: $PY_VER ✓"
+        ;;
+    *)
+        log "[ERROR] Unsupported Python version: $PY_VER"
+        log "[INFO] This plugin requires Python 3.13 or 3.14"
+        exit 1
+        ;;
+esac
 
-# 3. Detect STB Architecture (Modified to match actual file names)
+# 3. Detect STB Architecture
+# Method A: Check /usr/lib/enigma.info
 if [ -f /usr/lib/enigma.info ]; then
     INFO_ARCH=$(grep "^architecture=" /usr/lib/enigma.info | cut -d"=" -f2 | tr -d "'\"")
     case "$INFO_ARCH" in
-        cortexa15hf-neon-vfpv4|armv7ahf-neon|armv71|armv7l)
+        *cortexa15hf-neon-vfpv4*|*armv7ahf-neon*|*armv71*|*armv7l*)
             ARCH="arm"
             ;;
-        aarch64|arm64)
+        *aarch64*|*arm64*)
             ARCH="aarch64"
             ;;
-        mips|mipsel)
+        *mips*|*mipsel*)
             ARCH="mipsel"
             ;;
     esac
@@ -104,136 +106,108 @@ if [ -z "$ARCH" ]; then
     esac
 fi
 
-log "[INFO] Detected Architecture: ${ARCH:-Unknown}"
-
-# Verify supported arch and python
+# Verify architecture is supported
 case "$ARCH" in
     arm|aarch64|mipsel)
+        log "[INFO] Architecture: $ARCH ✓"
         ;;
     *)
-        log "[ERROR] Unsupported STB architecture: '$ARCH'. Aborting installation."
+        log "[ERROR] Unsupported architecture: $ARCH"
         log "[INFO] Supported architectures: arm, aarch64, mipsel"
         exit 1
         ;;
 esac
 
-# Verify Python version compatibility
-case "$PY_VER" in
-    3.13|3.14)
-        log "[INFO] Python $PY_VER is supported."
-        ;;
-    *)
-        log "[WARN] Detected Python version is $PY_VER."
-        log "[INFO] Available packages are for Python 3.13 and 3.14."
-        log "[INFO] Trying to find compatible package..."
-        # Try to use 3.14 if available, otherwise 3.13
-        if [ -n "$PY_VER" ]; then
-            # Keep original version for now, we'll try both
-            :
-        fi
-        ;;
-esac
+# 4. Construct package filename and download
+PKG_FILE="${PKG_BASE}_${ARCH}_py${PY_VER}.tar.gz"
+PKG_URL="https://github.com/${USERNAME}/${REPO}/raw/refs/heads/main/${PKG_FILE}"
+TMP_FILE="$TMP_DIR/${PKG_FILE}"
 
-# 4. Try to find and download the correct package
-install_package() {
-    local try_arch="$1"
-    local try_py="$2"
-    local MY_TAR="${PKG_BASE}_${try_arch}_py${try_py}.tar.gz"
-    local PLUGIN_URL="https://github.com/${USERNAME}/${REPO}/raw/refs/heads/main/${MY_TAR}"
-    local TMP_FILE="$TMP_DIR/$MY_TAR"
-    
-    log "[INFO] Trying: $MY_TAR"
-    
-    # Download
-    rm -f "$TMP_FILE"
-    if has_cmd wget; then
-        wget -q --no-check-certificate "$PLUGIN_URL" -O "$TMP_FILE"
-    elif has_cmd curl; then
-        curl -s -k -L "$PLUGIN_URL" -o "$TMP_FILE"
-    fi
-    
-    if [ -s "$TMP_FILE" ]; then
-        log "[INFO] Successfully downloaded: $MY_TAR"
-        # Install
-        if [ "$PKG_MANAGER" = "opkg" ]; then
-            opkg install --force-reinstall --force-overwrite "$TMP_FILE"
-        elif [ "$PKG_MANAGER" = "apt" ]; then
-            dpkg -i "$TMP_FILE"
-            apt-get install -f -y
-        fi
-        
-        if [ $? -eq 0 ]; then
-            rm -f "$TMP_FILE"
-            return 0
-        else
-            rm -f "$TMP_FILE"
-            return 1
-        fi
-    else
-        rm -f "$TMP_FILE"
-        return 1
-    fi
-}
+log "[INFO] Looking for: $PKG_FILE"
+log "[INFO] Download URL: $PKG_URL"
 
-# 5. Update Package Feeds
-log "[INFO] Updating package feeds..."
-if [ "$PKG_MANAGER" = "opkg" ]; then
-    opkg update >/dev/null 2>&1 || log "[WARN] opkg update failed, attempting installation anyway..."
-elif [ "$PKG_MANAGER" = "apt" ]; then
-    apt-get update >/dev/null 2>&1 || log "[WARN] apt-get update failed, attempting installation anyway..."
-fi
+# 5. Download the package
+log "[INFO] Downloading package..."
+rm -f "$TMP_FILE"
 
-# 6. Try to install with detected architecture and Python versions
-log "[INFO] Searching for compatible package..."
-
-INSTALLED=0
-
-# First try: exact match with detected Python
-if [ -n "$PY_VER" ]; then
-    if install_package "$ARCH" "$PY_VER"; then
-        INSTALLED=1
-    fi
-fi
-
-# Second try: try Python 3.14 if not installed
-if [ $INSTALLED -eq 0 ] && [ "$PY_VER" != "3.14" ]; then
-    log "[INFO] Trying Python 3.14 version..."
-    if install_package "$ARCH" "3.14"; then
-        INSTALLED=1
-    fi
-fi
-
-# Third try: try Python 3.13 if not installed
-if [ $INSTALLED -eq 0 ] && [ "$PY_VER" != "3.13" ]; then
-    log "[INFO] Trying Python 3.13 version..."
-    if install_package "$ARCH" "3.13"; then
-        INSTALLED=1
-    fi
-fi
-
-# Final check
-if [ $INSTALLED -eq 0 ]; then
-    log "[ERROR] Installation failed!"
-    log "[ERROR] Could not find compatible package for:"
-    log "[ERROR] Architecture: $ARCH"
-    log "[ERROR] Python: $PY_VER"
-    log "[INFO] Available packages:"
-    log "  - mytranslator_aarch64_py3.13.tar.gz"
-    log "  - mytranslator_aarch64_py3.14.tar.gz"
-    log "  - mytranslator_arm_py3.13.tar.gz"
-    log "  - mytranslator_arm_py3.14.tar.gz"
-    log "  - mytranslator_mipsel_py3.13.tar.gz"
-    log "  - mytranslator_mipsel_py3.14.tar.gz"
+if has_cmd wget; then
+    wget -q --no-check-certificate "$PKG_URL" -O "$TMP_FILE"
+elif has_cmd curl; then
+    curl -s -k -L "$PKG_URL" -o "$TMP_FILE"
+else
+    log "[ERROR] Neither wget nor curl found!"
     exit 1
 fi
 
-# 7. Cleanup and Finalize
+# Check if download was successful
+if [ ! -s "$TMP_FILE" ]; then
+    log "[ERROR] Download failed!"
+    log "[ERROR] Package not found: $PKG_FILE"
+    log "[ERROR] URL: $PKG_URL"
+    log ""
+    log "[INFO] Available packages:"
+    log "  • mytranslator_aarch64_py3.13.tar.gz"
+    log "  • mytranslator_aarch64_py3.14.tar.gz"
+    log "  • mytranslator_arm_py3.13.tar.gz"
+    log "  • mytranslator_arm_py3.14.tar.gz"
+    log "  • mytranslator_mipsel_py3.13.tar.gz"
+    log "  • mytranslator_mipsel_py3.14.tar.gz"
+    rm -f "$TMP_FILE"
+    exit 1
+fi
+
+log "[INFO] Download successful! ($PKG_FILE)"
+log "[INFO] File size: $(du -h "$TMP_FILE" | cut -f1)"
+
+# 6. Extract the package directly to root (/)
+log "[INFO] Extracting package to system root (/):"
+log "[INFO] tar -xzf $TMP_FILE -C /"
+
+if tar -xzf "$TMP_FILE" -C / 2>/dev/null; then
+    log "[INFO] Extraction successful! ✓"
+else
+    log "[ERROR] Failed to extract package!"
+    log "[ERROR] The package may be corrupted or incompatible."
+    rm -f "$TMP_FILE"
+    exit 1
+fi
+
+# 7. Set proper permissions for plugin files
+log "[INFO] Setting permissions..."
+
+# Find and set permissions for Python files
+if [ -d "/usr/lib/enigma2/python/Plugins/Extensions/MyTranslator" ]; then
+    chmod -R 755 "/usr/lib/enigma2/python/Plugins/Extensions/MyTranslator"
+    find "/usr/lib/enigma2/python/Plugins/Extensions/MyTranslator" -name "*.py" -exec chmod 644 {} \; 2>/dev/null
+    log "[INFO] Permissions set for MyTranslator plugin"
+elif [ -d "/usr/lib/enigma2/python/Plugins/Extensions" ]; then
+    # Try to find any MyTranslator directory
+    find "/usr/lib/enigma2/python/Plugins/Extensions" -type d -name "*MyTranslator*" -exec chmod -R 755 {} \; 2>/dev/null
+    log "[INFO] Permissions set for MyTranslator plugin"
+fi
+
+# Set permissions for any .sh or .py files in common locations
+find /usr/lib/enigma2 -name "*.py" -exec chmod 644 {} \; 2>/dev/null
+find /usr/lib/enigma2 -type d -exec chmod 755 {} \; 2>/dev/null
+
+# 8. Cleanup
+log "[INFO] Cleaning up temporary files..."
+rm -f "$TMP_FILE"
+
+# 9. Sync filesystem
 sync
 
 echo "===================================================="
 echo "          $PLUGIN_NAME INSTALLATION COMPLETE        "
 echo "===================================================="
-echo "[INFO] Installed successfully for $ARCH (Python $PY_VER)."
-echo "[INFO] Please restart GUI / Enigma2 to activate changes."
+echo "[INFO] Installed: $PKG_FILE"
+echo "[INFO] Architecture: $ARCH"
+echo "[INFO] Python Version: $PY_VER"
+echo ""
+echo "[INFO] Files extracted to: /"
+echo "[INFO] Plugin location: /usr/lib/enigma2/python/Plugins/Extensions/MyTranslator"
+echo ""
+echo "[INFO] Please restart GUI / Enigma2 to activate."
+echo "===================================================="
 
 exit 0
