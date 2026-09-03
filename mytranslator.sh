@@ -2,12 +2,11 @@
 
 # =========================================================================
 # One-liner execution command:
-# wget -qO - https://raw.githubusercontent.com/emilnabil/mytranslator/refs/heads/main/mytranslator.sh | /bin/sh
+# wget -qO - https://github.com/emilnabil/mytranslator/raw/refs/heads/main/mytranslator.sh | /bin/sh
 # =========================================================================
 
 PLUGIN_NAME="MyTranslator"
 PKG_BASE="mytranslator"
-VERSION=""
 USERNAME="emilnabil"
 REPO="mytranslator"
 
@@ -29,7 +28,7 @@ has_cmd() {
 }
 
 echo "===================================================="
-echo "         $PLUGIN_NAME IPK INSTALLER                 "
+echo "         $PLUGIN INSTALLER                 "
 echo "===================================================="
 
 # 1. Detect Package Manager
@@ -43,7 +42,7 @@ else
 fi
 log "[INFO] Package manager detected: ${PKG_MANAGER}"
 
-# 2. Detect Python Version (Formatted with decimal, e.g., 3.14)
+# 2. Detect Python Version
 if has_cmd python3; then
     PYTHON_VERSION="3"
     PY_VER=$(python3 -c 'import sys; print("%d.%d" % (sys.version_info.major, sys.version_info.minor))' 2>/dev/null)
@@ -56,32 +55,36 @@ fi
 if [ -z "$PY_VER" ] && [ -f /usr/lib/enigma.info ]; then
     PY_VER_RAW=$(grep "^python=" /usr/lib/enigma.info | cut -d"=" -f2 | tr -d "'\"")
     if [ -n "$PY_VER_RAW" ]; then
-        # Extract just the Major.Minor parts (e.g., 3.14.1 -> 3.14)
         PY_VER=$(echo "$PY_VER_RAW" | cut -d"." -f1,2)
     fi
 fi
 
 log "[INFO] Detected Python Version: Python $PY_VER"
 
-# 3. Detect STB Architecture
-# Method A: Check /usr/lib/enigma.info
+# 3. Detect STB Architecture (Modified to match actual file names)
 if [ -f /usr/lib/enigma.info ]; then
     INFO_ARCH=$(grep "^architecture=" /usr/lib/enigma.info | cut -d"=" -f2 | tr -d "'\"")
     case "$INFO_ARCH" in
-        cortexa15hf-neon-vfpv4|armv7ahf-neon|aarch64)
-            ARCH="$INFO_ARCH"
+        cortexa15hf-neon-vfpv4|armv7ahf-neon|armv71|armv7l)
+            ARCH="arm"
+            ;;
+        aarch64|arm64)
+            ARCH="aarch64"
+            ;;
+        mips|mipsel)
+            ARCH="mipsel"
             ;;
     esac
 fi
 
 # Method B: Check /etc/opkg/arch.conf
 if [ -z "$ARCH" ] && [ -f /etc/opkg/arch.conf ]; then
-    if grep -q "cortexa15hf-neon-vfpv4" /etc/opkg/arch.conf; then
-        ARCH="cortexa15hf-neon-vfpv4"
-    elif grep -q "armv7ahf-neon" /etc/opkg/arch.conf; then
-        ARCH="armv7ahf-neon"
-    elif grep -q "aarch64" /etc/opkg/arch.conf; then
+    if grep -q "cortexa15hf-neon-vfpv4\|armv7ahf-neon\|armv71\|armv7l" /etc/opkg/arch.conf; then
+        ARCH="arm"
+    elif grep -q "aarch64\|arm64" /etc/opkg/arch.conf; then
         ARCH="aarch64"
+    elif grep -q "mips\|mipsel" /etc/opkg/arch.conf; then
+        ARCH="mipsel"
     fi
 fi
 
@@ -93,7 +96,10 @@ if [ -z "$ARCH" ]; then
             ARCH="aarch64"
             ;;
         armv7l|arm*)
-            ARCH="cortexa15hf-neon-vfpv4"
+            ARCH="arm"
+            ;;
+        mips|mipsel)
+            ARCH="mipsel"
             ;;
     esac
 fi
@@ -102,31 +108,74 @@ log "[INFO] Detected Architecture: ${ARCH:-Unknown}"
 
 # Verify supported arch and python
 case "$ARCH" in
-    cortexa15hf-neon-vfpv4|armv7ahf-neon|aarch64)
+    arm|aarch64|mipsel)
         ;;
     *)
         log "[ERROR] Unsupported STB architecture: '$ARCH'. Aborting installation."
+        log "[INFO] Supported architectures: arm, aarch64, mipsel"
         exit 1
         ;;
 esac
 
+# Verify Python version compatibility
 case "$PY_VER" in
     3.13|3.14)
+        log "[INFO] Python $PY_VER is supported."
         ;;
     *)
-        log "[WARN] Detected Python version is $PY_VER (Official IPKs are for 3.13/3.14)."
+        log "[WARN] Detected Python version is $PY_VER."
+        log "[INFO] Available packages are for Python 3.13 and 3.14."
+        log "[INFO] Trying to find compatible package..."
+        # Try to use 3.14 if available, otherwise 3.13
+        if [ -n "$PY_VER" ]; then
+            # Keep original version for now, we'll try both
+            :
+        fi
         ;;
 esac
 
-# 4. Construct IPK File Name and Download URL
-MY_TAR="${PKG_BASE}_${ARCH}_py${PY_VER}.tar.gz"
-PLUGIN_URL="https://github.com/${USERNAME}/${REPO}/raw/refs/heads/main/${MY_TAR}"
-TMP_FILE="$TMP_DIR/$MY_TAR"
+# 4. Try to find and download the correct package
+install_package() {
+    local try_arch="$1"
+    local try_py="$2"
+    local MY_TAR="${PKG_BASE}_${try_arch}_py${try_py}.tar.gz"
+    local PLUGIN_URL="https://github.com/${USERNAME}/${REPO}/raw/refs/heads/main/${MY_TAR}"
+    local TMP_FILE="$TMP_DIR/$MY_TAR"
+    
+    log "[INFO] Trying: $MY_TAR"
+    
+    # Download
+    rm -f "$TMP_FILE"
+    if has_cmd wget; then
+        wget -q --no-check-certificate "$PLUGIN_URL" -O "$TMP_FILE"
+    elif has_cmd curl; then
+        curl -s -k -L "$PLUGIN_URL" -o "$TMP_FILE"
+    fi
+    
+    if [ -s "$TMP_FILE" ]; then
+        log "[INFO] Successfully downloaded: $MY_TAR"
+        # Install
+        if [ "$PKG_MANAGER" = "opkg" ]; then
+            opkg install --force-reinstall --force-overwrite "$TMP_FILE"
+        elif [ "$PKG_MANAGER" = "apt" ]; then
+            dpkg -i "$TMP_FILE"
+            apt-get install -f -y
+        fi
+        
+        if [ $? -eq 0 ]; then
+            rm -f "$TMP_FILE"
+            return 0
+        else
+            rm -f "$TMP_FILE"
+            return 1
+        fi
+    else
+        rm -f "$TMP_FILE"
+        return 1
+    fi
+}
 
-log "[INFO] Target Package: $MY_TAR"
-log "[INFO] Download Link: $PLUGIN_URL"
-
-# 5. Update Package Feeds (Allows tar.gz to resolve its own dependencies automatically)
+# 5. Update Package Feeds
 log "[INFO] Updating package feeds..."
 if [ "$PKG_MANAGER" = "opkg" ]; then
     opkg update >/dev/null 2>&1 || log "[WARN] opkg update failed, attempting installation anyway..."
@@ -134,40 +183,51 @@ elif [ "$PKG_MANAGER" = "apt" ]; then
     apt-get update >/dev/null 2>&1 || log "[WARN] apt-get update failed, attempting installation anyway..."
 fi
 
-# 6. Download My Tar Archive
-log "[INFO] Downloading IPK package..."
-rm -f "$TMP_FILE"
+# 6. Try to install with detected architecture and Python versions
+log "[INFO] Searching for compatible package..."
 
-if has_cmd wget; then
-    wget -q --no-check-certificate "$PLUGIN_URL" -O "$TMP_FILE"
-elif has_cmd curl; then
-    curl -s -k -L "$PLUGIN_URL" -o "$TMP_FILE"
+INSTALLED=0
+
+# First try: exact match with detected Python
+if [ -n "$PY_VER" ]; then
+    if install_package "$ARCH" "$PY_VER"; then
+        INSTALLED=1
+    fi
 fi
 
-if [ ! -s "$TMP_FILE" ]; then
-    log "[ERROR] Download failed or file not found on GitHub!"
-    log "[ERROR] Checked URL: $PLUGIN_URL"
-    rm -f "$TMP_FILE"
-    exit 1
+# Second try: try Python 3.14 if not installed
+if [ $INSTALLED -eq 0 ] && [ "$PY_VER" != "3.14" ]; then
+    log "[INFO] Trying Python 3.14 version..."
+    if install_package "$ARCH" "3.14"; then
+        INSTALLED=1
+    fi
 fi
 
-# 7. Install the IPK
-log "[INFO] Installing package..."
-if [ "$PKG_MANAGER" = "opkg" ]; then
-    opkg install --force-reinstall --force-overwrite "$TMP_FILE"
-elif [ "$PKG_MANAGER" = "apt" ]; then
-    dpkg -i "$TMP_FILE"
-    apt-get install -f -y
+# Third try: try Python 3.13 if not installed
+if [ $INSTALLED -eq 0 ] && [ "$PY_VER" != "3.13" ]; then
+    log "[INFO] Trying Python 3.13 version..."
+    if install_package "$ARCH" "3.13"; then
+        INSTALLED=1
+    fi
 fi
 
-if [ $? -ne 0 ]; then
+# Final check
+if [ $INSTALLED -eq 0 ]; then
     log "[ERROR] Installation failed!"
-    rm -f "$TMP_FILE"
+    log "[ERROR] Could not find compatible package for:"
+    log "[ERROR] Architecture: $ARCH"
+    log "[ERROR] Python: $PY_VER"
+    log "[INFO] Available packages:"
+    log "  - mytranslator_aarch64_py3.13.tar.gz"
+    log "  - mytranslator_aarch64_py3.14.tar.gz"
+    log "  - mytranslator_arm_py3.13.tar.gz"
+    log "  - mytranslator_arm_py3.14.tar.gz"
+    log "  - mytranslator_mipsel_py3.13.tar.gz"
+    log "  - mytranslator_mipsel_py3.14.tar.gz"
     exit 1
 fi
 
-# 8. Cleanup and Finalize
-rm -f "$TMP_FILE"
+# 7. Cleanup and Finalize
 sync
 
 echo "===================================================="
